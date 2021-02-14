@@ -1,13 +1,14 @@
-use serde::{de, Deserializer};
-use serde_json;
 use std::fmt;
 use std::io;
 use std::option::Option;
 use std::string::*;
-use chan::Sender;
 use std::thread;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crossbeam_channel::Sender;
+use serde::{de, Deserializer};
+use serde_derive::Deserialize;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
     Middle,
@@ -20,7 +21,7 @@ pub enum MouseButton {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct I3BarEvent {
+struct I3BarEventInternal {
     pub name: Option<String>,
     pub instance: Option<String>,
     pub x: u64,
@@ -30,29 +31,43 @@ pub struct I3BarEvent {
     pub button: MouseButton,
 }
 
+#[derive(Debug, Clone)]
+pub struct I3BarEvent {
+    pub id: Option<usize>,
+    pub button: MouseButton,
+}
+
 impl I3BarEvent {
-    pub fn matches_name(&self, other: &str) -> bool {
-        match self.name {
-            Some(ref name) => name.as_str() == other,
+    pub fn matches_id(&self, other: usize) -> bool {
+        match self.id {
+            Some(id) => id == other,
             _ => false,
         }
     }
 }
 
 pub fn process_events(sender: Sender<I3BarEvent>) {
-    thread::spawn(move || loop {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
+    thread::Builder::new()
+        .name("input".into())
+        .spawn(move || loop {
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).unwrap();
 
-        // Take only the valid JSON object betweem curly braces (cut off leading bracket, commas and whitespace)
-        let slice = input.trim_start_matches(|c| c != '{');
-        let slice = slice.trim_end_matches(|c| c != '}');
+            // Take only the valid JSON object betweem curly braces (cut off leading bracket, commas and whitespace)
+            let slice = input.trim_start_matches(|c| c != '{');
+            let slice = slice.trim_end_matches(|c| c != '}');
 
-        if !slice.is_empty() {
-            let e: I3BarEvent = serde_json::from_str(slice).unwrap();
-            sender.send(e);
-        }
-    });
+            if !slice.is_empty() {
+                let e: I3BarEventInternal = serde_json::from_str(slice).unwrap();
+                sender
+                    .send(I3BarEvent {
+                        id: e.name.map(|x| x.parse::<usize>().unwrap()),
+                        button: e.button,
+                    })
+                    .unwrap();
+            }
+        })
+        .unwrap();
 }
 
 fn deserialize_mousebutton<'de, D>(deserializer: D) -> Result<MouseButton, D::Error>
@@ -72,7 +87,8 @@ where
         where
             E: de::Error,
         {
-            eprintln!("{}", value);
+            // TODO: put this behind `--debug` flag
+            //eprintln!("{}", value);
             Ok(match value {
                 1 => MouseButton::Left,
                 2 => MouseButton::Middle,

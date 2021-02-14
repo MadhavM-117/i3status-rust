@@ -1,24 +1,30 @@
-use crate::config::Config;
-use crate::widget::State;
 use serde_json::value::Value;
+
 use super::super::widget::I3BarWidget;
+use crate::config::Config;
+use crate::widget::Spacing;
+use crate::widget::State;
 
 #[derive(Clone, Debug)]
 pub struct TextWidget {
+    id: usize,
     content: Option<String>,
     icon: Option<String>,
     state: State,
+    spacing: Spacing,
     rendered: Value,
     cached_output: Option<String>,
     config: Config,
 }
 
 impl TextWidget {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, id: usize) -> Self {
         TextWidget {
+            id,
             content: None,
             icon: None,
             state: State::Idle,
+            spacing: Spacing::Normal,
             rendered: json!({
                 "full_text": "",
                 "separator": false,
@@ -49,6 +55,12 @@ impl TextWidget {
         self
     }
 
+    pub fn with_spacing(mut self, spacing: Spacing) -> Self {
+        self.spacing = spacing;
+        self.update();
+        self
+    }
+
     pub fn set_text(&mut self, content: String) {
         self.content = Some(content);
         self.update();
@@ -64,15 +76,31 @@ impl TextWidget {
         self.update();
     }
 
+    pub fn set_spacing(&mut self, spacing: Spacing) {
+        self.spacing = spacing;
+        self.update();
+    }
+
     fn update(&mut self) {
         let (key_bg, key_fg) = self.state.theme_keys(&self.config.theme);
 
         self.rendered = json!({
-            "full_text": format!("{}{} ",
-                                self.icon.clone().unwrap_or_else(|| String::from(" ")),
-                                self.content.clone().unwrap_or_else(|| String::from(""))),
+            "full_text": format!("{}{}{}",
+                                self.icon.clone().unwrap_or_else(|| {
+                                    match self.spacing {
+                                        Spacing::Normal => String::from(" "),
+                                        _ => String::from("")
+                                    }
+                                }),
+                                self.content.clone().unwrap_or_else(|| String::from("")),
+                                match self.spacing {
+                                    Spacing::Hidden => String::from(""),
+                                    _ => String::from(" ")
+                                }
+                            ),
             "separator": false,
             "separator_block_width": 0,
+            "name": self.id.to_string(),
             "background": key_bg.to_owned(),
             "color": key_fg.to_owned()
         });

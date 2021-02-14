@@ -1,25 +1,31 @@
-use crate::config::Config;
-use crate::widget::State;
+use num_traits::{clamp, ToPrimitive};
 use serde_json::value::Value;
+
 use super::super::widget::I3BarWidget;
-use num::{clamp, ToPrimitive};
+use crate::config::Config;
+use crate::widget::Spacing;
+use crate::widget::State;
 
 #[derive(Clone, Debug)]
 pub struct GraphWidget {
+    id: usize,
     content: Option<String>,
     icon: Option<String>,
     state: State,
+    spacing: Spacing,
     rendered: Value,
     cached_output: Option<String>,
     config: Config,
 }
 #[allow(dead_code)]
 impl GraphWidget {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, id: usize) -> Self {
         GraphWidget {
+            id,
             content: None,
             icon: None,
             state: State::Idle,
+            spacing: Spacing::Normal,
             rendered: json!({
                 "full_text": "",
                 "separator": false,
@@ -44,11 +50,17 @@ impl GraphWidget {
         self
     }
 
+    pub fn with_spacing(mut self, spacing: Spacing) -> Self {
+        self.spacing = spacing;
+        self.update();
+        self
+    }
+
     pub fn set_values<T>(&mut self, content: &[T], min: Option<T>, max: Option<T>)
     where
         T: Ord + ToPrimitive,
     {
-        let bars = ["_", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+        let bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
         let min: f64 = match min {
             Some(x) => x.to_f64().unwrap(),
             None => content.iter().min().unwrap().to_f64().unwrap(),
@@ -92,11 +104,22 @@ impl GraphWidget {
         let (key_bg, key_fg) = self.state.theme_keys(&self.config.theme);
 
         self.rendered = json!({
-            "full_text": format!("{}{} ",
-                                self.icon.clone().unwrap_or_else(|| String::from(" ")),
-                                self.content.clone().unwrap_or_else(|| String::from(""))),
+            "full_text": format!("{}{}{}",
+                                self.icon.clone().unwrap_or_else(|| {
+                                    match self.spacing {
+                                        Spacing::Normal => String::from(" "),
+                                        _ => String::from("")
+                                    }
+                                }),
+                                self.content.clone().unwrap_or_else(|| String::from("")),
+                                match self.spacing {
+                                    Spacing::Hidden => String::from(""),
+                                    _ => String::from(" ")
+                                }
+                            ),
             "separator": false,
             "separator_block_width": 0,
+            "name": self.id.to_string(),
             "background": key_bg.to_owned(),
             "color": key_fg.to_owned()
         });

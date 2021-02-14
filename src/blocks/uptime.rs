@@ -1,86 +1,83 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use chan::Sender;
-use uuid::Uuid;
+use crossbeam_channel::Sender;
+use serde_derive::Deserialize;
 
-use crate::block::{Block, ConfigBlock};
+use crate::blocks::{Block, ConfigBlock, Update};
 use crate::config::Config;
 use crate::de::deserialize_duration;
 use crate::errors::*;
 use crate::scheduler::Task;
 use crate::util::read_file;
-use crate::widgets::text::TextWidget;
 use crate::widget::I3BarWidget;
+use crate::widgets::text::TextWidget;
 
 pub struct Uptime {
+    id: usize,
     text: TextWidget,
-    id: String,
     update_interval: Duration,
-
-    //useful, but optional
-    #[allow(dead_code)] config: Config,
-    #[allow(dead_code)] tx_update_request: Sender<Task>,
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct UptimeConfig {
     /// Update interval in seconds
-    #[serde(default = "UptimeConfig::default_interval", deserialize_with = "deserialize_duration")]
+    #[serde(
+        default = "UptimeConfig::default_interval",
+        deserialize_with = "deserialize_duration"
+    )]
     pub interval: Duration,
+    #[serde(default = "UptimeConfig::default_color_overrides")]
+    pub color_overrides: Option<BTreeMap<String, String>>,
 }
 
 impl UptimeConfig {
     fn default_interval() -> Duration {
         Duration::from_secs(60)
     }
+    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
+        None
+    }
 }
 
 impl ConfigBlock for Uptime {
     type Config = UptimeConfig;
 
-    fn new(block_config: Self::Config, config: Config, tx_update_request: Sender<Task>) -> Result<Self> {
+    fn new(
+        id: usize,
+        block_config: Self::Config,
+        config: Config,
+        _tx_update_request: Sender<Task>,
+    ) -> Result<Self> {
+        let text = TextWidget::new(config, id).with_icon("uptime");
+
         Ok(Uptime {
-            id: Uuid::new_v4().simple().to_string(),
+            id,
             update_interval: block_config.interval,
-            text: TextWidget::new(config.clone()).with_icon("uptime"),
-            tx_update_request,
-            config,
+            text,
         })
     }
 }
 
 impl Block for Uptime {
-    fn update(&mut self) -> Result<Option<Duration>> {
-        let uptime_raw = match read_file("uptime", Path::new("/proc/uptime")) {
-            Ok(file) => file,
-            Err(e) => {
-                return Err(BlockError(
-                    "Uptime".to_owned(),
-                    format!("Uptime failed to read /proc/uptime: '{}'", e),
-                ));
-            }
-        };
-        let uptime = match uptime_raw.split_whitespace().nth(0) {
-            Some(uptime) => uptime,
-            None => {
-                return Err(BlockError(
-                    "Uptime".to_owned(),
-                    "Uptime failed to read uptime string.".to_owned(),
-                ));
-            }
-        };
+    fn update(&mut self) -> Result<Option<Update>> {
+        let uptime_raw = read_file("uptime", Path::new("/proc/uptime")).map_err(|e| {
+            BlockError(
+                "Uptime".to_owned(),
+                format!("Uptime failed to read /proc/uptime: '{}'", e),
+            )
+        })?;
+        let uptime = uptime_raw
+            .split_whitespace()
+            .next()
+            .block_error("Uptime", "Uptime failed to read uptime string.")?;
 
-        let total_seconds = match uptime.parse::<f64>() {
-            Ok(uptime) => uptime as u32,
-            Err(e) => {
-                return Err(BlockError(
-                    "Uptime".to_owned(),
-                    format!("Uptime failed to convert uptime float to integer: '{}')", e),
-                ));
-            }
-        };
+        let total_seconds = uptime
+            .parse::<f64>()
+            .map(|x| x as u32)
+            .block_error("Uptime", "Failed to convert uptime float to integer)")?;
 
         // split up seconds into more human readable portions
         let weeks = (total_seconds / 604_800) as u32;
@@ -108,14 +105,14 @@ impl Block for Uptime {
             unreachable!()
         };
         self.text.set_text(text);
-        Ok(Some(self.update_interval))
+        Ok(Some(self.update_interval.into()))
     }
 
-    fn view(&self) -> Vec<&I3BarWidget> {
+    fn view(&self) -> Vec<&dyn I3BarWidget> {
         vec![&self.text]
     }
 
-    fn id(&self) -> &str {
-        &self.id
+    fn id(&self) -> usize {
+        self.id
     }
 }

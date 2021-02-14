@@ -1,26 +1,30 @@
-use crate::config::Config;
-use crate::widget::State;
 use serde_json::value::Value;
+
 use super::super::widget::I3BarWidget;
+use crate::config::Config;
+use crate::widget::Spacing;
+use crate::widget::State;
 
 #[derive(Clone, Debug)]
 pub struct ButtonWidget {
+    id: usize,
     content: Option<String>,
     icon: Option<String>,
     state: State,
-    id: String,
+    spacing: Spacing,
     rendered: Value,
     cached_output: Option<String>,
     config: Config,
 }
 
 impl ButtonWidget {
-    pub fn new(config: Config, id: &str) -> Self {
+    pub fn new(config: Config, id: usize) -> Self {
         ButtonWidget {
             content: None,
             icon: None,
             state: State::Idle,
-            id: String::from(id),
+            spacing: Spacing::Normal,
+            id,
             rendered: json!({
                 "full_text": "",
                 "separator": false,
@@ -58,6 +62,12 @@ impl ButtonWidget {
         self
     }
 
+    pub fn with_spacing(mut self, spacing: Spacing) -> Self {
+        self.spacing = spacing;
+        self.update();
+        self
+    }
+
     pub fn set_text<S: Into<String>>(&mut self, content: S) {
         self.content = Some(content.into());
         self.update();
@@ -73,15 +83,31 @@ impl ButtonWidget {
         self.update();
     }
 
+    pub fn set_spacing(&mut self, spacing: Spacing) {
+        self.spacing = spacing;
+        self.update();
+    }
+
     fn update(&mut self) {
         let (key_bg, key_fg) = self.state.theme_keys(&self.config.theme);
 
+        // When rendered inline, remove the leading space
         self.rendered = json!({
-            "full_text": format!("{}{} ",
-                                self.icon.clone().unwrap_or_else(|| String::from(" ")),
-                                self.content.clone().unwrap_or_else(|| String::from(""))),
+            "full_text": format!("{}{}{}",
+                                self.icon.clone().unwrap_or_else(|| {
+                                    match self.spacing {
+                                        Spacing::Normal => String::from(" "),
+                                        _ => String::from("")
+                                    }
+                                }),
+                                self.content.clone().unwrap_or_else(|| String::from("")),
+                                match self.spacing {
+                                    Spacing::Hidden => String::from(""),
+                                    _ => String::from(" ")
+                                }
+                            ),
             "separator": false,
-            "name": self.id.clone(),
+            "name": self.id.to_string(),
             "separator_block_width": 0,
             "background": key_bg,
             "color": key_fg,

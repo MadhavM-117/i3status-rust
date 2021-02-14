@@ -53,9 +53,7 @@ impl<T> OptionExt<T> for ::std::option::Option<T> {
     }
 
     fn internal_error(self, context: &str, message: &str) -> Result<T> {
-        self.ok_or_else(|| {
-            InternalError(context.to_owned(), message.to_owned(), None)
-        })
+        self.ok_or_else(|| InternalError(context.to_owned(), message.to_owned(), None))
     }
 }
 
@@ -69,12 +67,15 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            BlockError(ref block, ref message) => f.write_str(&format!("Error in block '{}': {}", block, message)),
-            ConfigurationError(ref message, _) => f.write_str(&format!("Configuration error: {}", message)),
+            BlockError(ref block, ref message) => {
+                f.write_str(&format!("Error in block '{}': {}", block, message))
+            }
+            ConfigurationError(ref message, _) => {
+                f.write_str(&format!("Configuration error: {}", message))
+            }
             InternalError(ref context, ref message, _) => f.write_str(&format!(
                 "Internal error in context '{}': {}",
-                context,
-                message
+                context, message
             )),
         }
     }
@@ -83,22 +84,20 @@ impl fmt::Display for Error {
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            BlockError(ref block, ref message) => f.write_str(&format!("Error in block '{}': {}", block, message)),
+            BlockError(ref block, ref message) => {
+                f.write_str(&format!("Error in block '{}': {}", block, message))
+            }
             ConfigurationError(ref message, (ref cause, _)) => f.write_str(&format!(
                 "Configuration error: {}.\nCause: {}",
-                message,
-                cause
+                message, cause
             )),
             InternalError(ref context, ref message, Some((ref cause, _))) => f.write_str(&format!(
                 "Internal error in context '{}': {}.\nCause: {}",
-                context,
-                message,
-                cause
+                context, message, cause
             )),
             InternalError(ref context, ref message, None) => f.write_str(&format!(
                 "Internal error in context '{}': {}",
-                context,
-                message
+                context, message
             )),
         }
     }
@@ -107,28 +106,22 @@ impl fmt::Debug for Error {
 impl StdError for Error {
     fn description(&self) -> &str {
         match *self {
-            BlockError(_, _) => "Block error occured in block '{}'",
-            ConfigurationError(_, _) => "Configuration error occured",
-            InternalError(_, _, _) => "Internal error occured",
+            BlockError(_, _) => "Block error occurred in block '{}'",
+            ConfigurationError(_, _) => "Configuration error occurred",
+            InternalError(_, _, _) => "Internal error occurred",
         }
     }
 
-    fn cause(&self) -> Option<&StdError> {
-        match *self {
-            _ => None,
-        }
+    fn cause(&self) -> Option<&dyn StdError> {
+        None
     }
 }
 
-impl<T> From<::std::sync::mpsc::SendError<T>> for Error
+impl<T> From<::crossbeam_channel::SendError<T>> for Error
 where
-    T: fmt::Display + Send,
+    T: Send,
 {
-    fn from(err: ::std::sync::mpsc::SendError<T>) -> Error {
-        InternalError(
-            "unknown".to_owned(),
-            format!("send error for '{}'", err.0),
-            None,
-        )
+    fn from(_err: ::crossbeam_channel::SendError<T>) -> Error {
+        InternalError("unknown".to_string(), "send error".to_string(), None)
     }
 }
