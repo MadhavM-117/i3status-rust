@@ -1,14 +1,16 @@
 use std::time::{Duration, Instant};
 
-use serde_json::value::Value;
-
-use crate::config::Config;
+use super::{I3BarWidget, Spacing, State};
+use crate::config::SharedConfig;
 use crate::errors::*;
-use crate::widget::{I3BarWidget, Spacing, State};
+use crate::protocol::i3bar_block::{I3BarBlock, I3BarBlockMinWidth};
+use crate::util::escape_pango_text;
 
 #[derive(Clone, Debug)]
 pub struct RotatingTextWidget {
     id: usize,
+    pub instance: usize,
+    pub rotating: bool,
     rotation_pos: usize,
     max_width: usize,
     dynamic_width: bool,
@@ -19,24 +21,30 @@ pub struct RotatingTextWidget {
     icon: Option<String>,
     state: State,
     spacing: Spacing,
-    rendered: Value,
-    cached_output: Option<String>,
-    config: Config,
-    pub rotating: bool,
+    shared_config: SharedConfig,
+    inner: I3BarBlock,
 }
 
 #[allow(dead_code)]
 impl RotatingTextWidget {
     pub fn new(
+        id: usize,
+        instance: usize,
         interval: Duration,
         speed: Duration,
         max_width: usize,
         dynamic_width: bool,
-        config: Config,
-        id: usize,
+        shared_config: SharedConfig,
     ) -> RotatingTextWidget {
+        let inner = I3BarBlock {
+            name: Some(id.to_string()),
+            instance: Some(instance.to_string()),
+            ..I3BarBlock::default()
+        };
+
         RotatingTextWidget {
             id,
+            instance,
             rotation_pos: 0,
             max_width,
             dynamic_width,
@@ -47,23 +55,18 @@ impl RotatingTextWidget {
             icon: None,
             state: State::Idle,
             spacing: Spacing::Normal,
-            rendered: json!({
-                "full_text": "",
-                "separator": false,
-                "separator_block_width": 0,
-                "background": "#000000",
-                "color": "#000000"
-            }),
-            cached_output: None,
-            config,
+            //cached_output: None,
+            shared_config,
             rotating: false,
+
+            inner,
         }
     }
 
-    pub fn with_icon(mut self, name: &str) -> Self {
-        self.icon = self.config.icons.get(name).cloned();
+    pub fn with_icon(mut self, name: &str) -> Result<Self> {
+        self.icon = Some(self.shared_config.get_icon(name)?);
         self.update();
-        self
+        Ok(self)
     }
 
     pub fn with_state(mut self, state: State) -> Self {
@@ -95,9 +98,10 @@ impl RotatingTextWidget {
         self.update();
     }
 
-    pub fn set_icon(&mut self, name: &str) {
-        self.icon = self.config.icons.get(name).cloned();
+    pub fn set_icon(&mut self, name: &str) -> Result<()> {
+        self.icon = Some(self.shared_config.get_icon(name)?);
         self.update();
+        Ok(())
     }
 
     pub fn set_text(&mut self, content: String) {
@@ -144,42 +148,32 @@ impl RotatingTextWidget {
     }
 
     fn update(&mut self) {
-        let (key_bg, key_fg) = self.state.theme_keys(&self.config.theme);
+        let (key_bg, key_fg) = self.state.theme_keys(&self.shared_config.theme);
 
-        let icon = self.icon.clone().unwrap_or_else(|| match self.spacing {
+        let mut icon = self.icon.clone().unwrap_or_else(|| match self.spacing {
             Spacing::Normal => String::from(" "),
             _ => String::from(""),
         });
 
-        self.rendered = json!({
-            "full_text": format!("{}{}{}",
-                                icon,
-                                self.get_rotated_content(),
-                                match self.spacing {
-                                    Spacing::Hidden => String::from(""),
-                                    _ => String::from(" ")
-                                }),
-            "separator": false,
-            "separator_block_width": 0,
-            "name" : self.id.to_string(),
-            "min_width":
-                if self.content.is_empty() {
-                    "".to_string()
-                } else {
-                    let text_width = self.get_rotated_content().chars().count();
-                    let icon_width = icon.chars().count();
-                    if self.dynamic_width && text_width < self.max_width {
-                        "0".repeat(text_width + icon_width)
-                    } else {
-                        "0".repeat(self.max_width + icon_width + 1)
-                    }
-                },
-            "align": "left",
-            "background": key_bg,
-            "color": key_fg
-        });
-
-        self.cached_output = Some(self.rendered.to_string());
+        self.inner.full_text = format!(
+            "{}{}{}",
+            icon,
+            escape_pango_text(self.get_rotated_content()),
+            match self.spacing {
+                Spacing::Hidden => String::from(""),
+                _ => String::from(" "),
+            }
+        );
+        self.inner.min_width = {
+            if self.dynamic_width || self.content.is_empty() {
+                None
+            } else {
+                icon.push_str(&"0".repeat(self.max_width + 1));
+                Some(I3BarBlockMinWidth::Text(icon))
+            }
+        };
+        self.inner.background = key_bg.clone();
+        self.inner.color = key_fg.clone();
     }
 
     pub fn next(&mut self) -> Result<(bool, Option<Duration>)> {
@@ -211,13 +205,7 @@ impl RotatingTextWidget {
 }
 
 impl I3BarWidget for RotatingTextWidget {
-    fn to_string(&self) -> String {
-        self.cached_output
-            .clone()
-            .unwrap_or_else(|| self.rendered.to_string())
-    }
-
-    fn get_rendered(&self) -> &Value {
-        &self.rendered
+    fn get_data(&self) -> I3BarBlock {
+        self.inner.clone()
     }
 }

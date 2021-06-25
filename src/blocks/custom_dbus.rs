@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -7,16 +6,15 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use dbus::blocking::LocalConnection;
 use dbus::strings::Signature;
-use dbus::tree::Factory;
+use dbus_tree::Factory;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::errors::*;
-use crate::input::I3BarEvent;
 use crate::scheduler::Task;
-use crate::widget::{I3BarWidget, State};
 use crate::widgets::text::TextWidget;
+use crate::widgets::{I3BarWidget, State};
 
 #[derive(Clone)]
 struct CustomDBusStatus {
@@ -31,19 +29,10 @@ pub struct CustomDBus {
     status: Arc<Mutex<CustomDBusStatus>>,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CustomDBusConfig {
     pub name: String,
-
-    #[serde(default = "CustomDBusConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
-}
-
-impl CustomDBusConfig {
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
-    }
 }
 
 impl ConfigBlock for CustomDBus {
@@ -52,7 +41,7 @@ impl ConfigBlock for CustomDBus {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         send: Sender<Task>,
     ) -> Result<Self> {
         let status_original = Arc::new(Mutex::new(CustomDBusStatus {
@@ -130,7 +119,7 @@ impl ConfigBlock for CustomDBus {
             })
             .unwrap();
 
-        let text = TextWidget::new(config, id).with_text("CustomDBus");
+        let text = TextWidget::new(id, 0, shared_config).with_text("CustomDBus");
         Ok(CustomDBus { id, text, status })
     }
 }
@@ -148,7 +137,11 @@ impl Block for CustomDBus {
             .block_error("custom_dbus", "failed to acquire lock")?)
         .clone();
         self.text.set_text(status.content);
-        self.text.set_icon(&status.icon);
+        if status.icon.is_empty() {
+            self.text.unset_icon();
+        } else {
+            self.text.set_icon(&status.icon)?;
+        }
         self.text.set_state(status.state);
         Ok(None)
     }
@@ -156,10 +149,5 @@ impl Block for CustomDBus {
     // Returns the view of the block, comprised of widgets.
     fn view(&self) -> Vec<&dyn I3BarWidget> {
         vec![&self.text]
-    }
-
-    // This function is called on every block for every click.
-    fn click(&mut self, _: &I3BarEvent) -> Result<()> {
-        Ok(())
     }
 }

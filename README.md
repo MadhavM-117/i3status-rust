@@ -4,7 +4,7 @@
 
 `i3status-rs` is a feature-rich and resource-friendly replacement for i3status, written in pure Rust. It provides a way to display "blocks" of system information (time, battery status, volume, etc) on the [i3](https://i3wm.org/) bar. It is also compatible with [sway](http://swaywm.org/).
 
-For a list of available blocks, see the [block documentation](blocks.md). Further information can be found on the [Wiki](https://github.com/greshake/i3status-rust/wiki).
+For a list of available blocks, see the [block documentation](https://github.com/greshake/i3status-rust/blob/master/doc/blocks.md). Further information can be found on the [Wiki](https://github.com/greshake/i3status-rust/wiki).
 
 ## Requirements
 
@@ -14,11 +14,12 @@ We also require Libdbus 1.6 or higher. On some older systems this may require in
 
 Compilation is only tested with very recent stable versions of `rustc`. If you use a distro with older Rust packages, consider using [rustup](https://rustup.rs/) to install a newer toolchain.
 
-Most blocks assume you are running Linux, and some have their own system requirements; these are mentioned in the [block documentation](blocks.md).
+Most blocks assume you are running Linux, and some have their own system requirements; these are mentioned in the [block documentation](https://github.com/greshake/i3status-rust/blob/master/doc/blocks.md).
 
 Optional:
 
 * Font Awesome 4.x is required when using the icons config `name = "awesome"`. For version 5, use `name = "awesome5"`. On Arch Linux version 4 is available in the [`AUR`](https://aur.archlinux.org/packages/ttf-font-awesome-4/), and version 5 is available [`here`](https://www.archlinux.org/packages/community/any/ttf-font-awesome/).
+* For icons config `name = material`, a patched version of Google's MaterialIcons-Regular.ttf is required which includes \u{0020} (space), sets a descent ands lower all glyphs to properly align. It can be found [here](https://gist.github.com/draoncc/3c20d8d4262892ccd2e227eefeafa8ef/raw/3e6e12c213fba1ec28aaa26430c3606874754c30/MaterialIcons-Regular-for-inline.ttf).
 * Powerline Fonts are required for all themes using the powerline arrow char.
 * `gperftools` is required for building with the `"profiling"` feature flag (disabled by default).
 
@@ -34,39 +35,36 @@ Stable releases are packaged on some distributions:
 
 * On NixOS: `nix-env -iA nixos.i3status-rust`
 
-* With [Home Manager](https://github.com/nix-community/home-manager): `programs.i3status-rust.enable = true` [see available options](https://nix-community.github.io/home-manager/options.html#opt-programs.i3status-rust.enable) 
+* With [Home Manager](https://github.com/nix-community/home-manager): `programs.i3status-rust.enable = true` [see available options](https://nix-community.github.io/home-manager/options.html#opt-programs.i3status-rust.enable)
 
 Otherwise, you can install from source:
 
 ```shell
-$ cargo install --git https://github.com/greshake/i3status-rust i3status-rs
+$ git clone https://github.com/greshake/i3status-rust
+$ cd i3status-rust
+$ cargo install --path .
+$ ./install.sh
 ```
 
 By default, this will install the binary to `~/.cargo/bin/i3status-rs`.
 
-or manually:
-
-```shell
-$ git clone https://github.com/greshake/i3status-rust
-$ cd i3status-rust && cargo build --release
-# Optional:
-$ cp target/release/i3status-rs ~/bin/i3status-rs
-```
-
 ## Configuration
 
 After installing `i3status-rust`, you need to create a configuration file.
-Edit the [example configuration](https://raw.githubusercontent.com/greshake/i3status-rust/master/example_config.toml) to your liking.
+Edit the [example configuration](https://raw.githubusercontent.com/greshake/i3status-rust/master/examples/config.toml) to your liking.
 The default location is `$XDG_CONFIG_HOME/i3status-rust/config.toml`.
 
 There are some top-level configuration variables:
 
 Key | Description | Required | Default
 ----|-------------|----------|--------
-`icons` | The icon set that should be used. Possible values are `none`, `awesome`, `awesome5` and `material`. Check [themes.md](https://github.com/greshake/i3status-rust/blob/master/themes.md) for more information | No | `none`
-`theme` | The predefined theme that should be used. You can also add your own overrides. Check [themes.md](https://github.com/greshake/i3status-rust/blob/master/themes.md) for all available themes. | No | `plain`
+`icons` | The icon set that should be used. Possible values are `none`, `awesome`, `awesome5`, `material` and `material-nf`. Check [themes.md](https://github.com/greshake/i3status-rust/blob/master/doc/themes.md) for more information | No | `none`
+`icons_format` | A string to customise the appearance of each icon. Can be used to edit icons' spacing or specify a font that will be applied only to icons via pango markup. For example, set it to `" <span font_family='NotoSans Nerd Font'>{icon}</span> "` to set font of the icons to be 'NotoSans Nerd Font' | No | `" {icon} "`
+`theme` | The predefined theme that should be used. You can also add your own overrides. Check [themes.md](https://github.com/greshake/i3status-rust/blob/master/doc/themes.md) for all available themes. | No | `plain`
 `scrolling` | The direction of scrolling, either `natural` or `reverse` | No | `reverse`
-`block` | All blocks that will exist in your i3bar. Check [blocks.md](https://github.com/greshake/i3status-rust/blob/master/blocks.md) for all blocks and their parameters. | No | none
+`block` | All blocks that will exist in your i3bar. Check [blocks.md](https://github.com/greshake/i3status-rust/blob/master/doc/blocks.md) for all blocks and their parameters. | No | none
+
+Refer to [formatting documentation](https://github.com/greshake/i3status-rust/blob/master/doc/blocks.md#formatting) to customize formatting strings' placeholders.
 
 ## Integrate it into i3
 

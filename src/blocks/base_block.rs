@@ -1,13 +1,11 @@
 //! A Base block for common behavior for all blocks
 
+use std::collections::HashMap;
+
 use crate::errors::*;
-use crate::{
-    blocks::Update,
-    input::{I3BarEvent, MouseButton},
-    subprocess::spawn_child_async,
-    widget::I3BarWidget,
-    Block,
-};
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
+use crate::{blocks::Update, subprocess::spawn_child_async, widgets::I3BarWidget, Block};
+
 use serde_derive::Deserialize;
 use toml::{value::Table, Value};
 
@@ -37,11 +35,9 @@ impl<T: Block> Block for BaseBlock<T> {
     fn click(&mut self, e: &I3BarEvent) -> Result<()> {
         match &self.on_click {
             Some(cmd) => {
-                if e.matches_id(self.id()) {
-                    if let MouseButton::Left = e.button {
-                        spawn_child_async("sh", &["-c", &cmd])
-                            .block_error(&self.name, "could not spawn child")?;
-                    }
+                if let MouseButton::Left = e.button {
+                    spawn_child_async("sh", &["-c", &cmd])
+                        .block_error(&self.name, "could not spawn child")?;
                 }
                 Ok(())
             }
@@ -54,10 +50,13 @@ impl<T: Block> Block for BaseBlock<T> {
 pub(super) struct BaseBlockConfig {
     /// Command to execute when the button is clicked
     pub on_click: Option<String>,
+
+    pub theme_overrides: Option<HashMap<String, String>>,
+    pub icons_format: Option<String>,
 }
 
 impl BaseBlockConfig {
-    const FIELDS: &'static [&'static str] = &["on_click"];
+    const FIELDS: &'static [&'static str] = &["on_click", "theme_overrides", "icons_format"];
 
     // FIXME: this function is to paper over https://github.com/serde-rs/serde/issues/1957
     pub(super) fn extract(config: &mut Value) -> Value {

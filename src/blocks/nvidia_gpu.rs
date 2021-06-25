@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::Duration;
 
@@ -6,15 +5,15 @@ use crossbeam_channel::Sender;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::{Config, LogicalDirection, Scrolling};
+use crate::config::SharedConfig;
+use crate::config::{LogicalDirection, Scrolling};
 use crate::de::deserialize_duration;
 use crate::errors::*;
-use crate::input::{I3BarEvent, MouseButton};
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::util::pseudo_uuid;
-use crate::widget::{I3BarWidget, Spacing, State};
-use crate::widgets::button::ButtonWidget;
 use crate::widgets::text::TextWidget;
+use crate::widgets::{I3BarWidget, Spacing, State};
 
 pub struct NvidiaGpu {
     id: usize,
@@ -25,22 +24,25 @@ pub struct NvidiaGpu {
     gpu_enabled: bool,
     gpu_id: u64,
 
-    name_widget: ButtonWidget,
+    name_widget: TextWidget,
     name_widget_mode: NameWidgetMode,
     label: String,
 
-    show_memory: Option<ButtonWidget>,
+    show_memory: Option<TextWidget>,
     memory_widget_mode: MemoryWidgetMode,
 
     show_utilization: Option<TextWidget>,
     show_temperature: Option<TextWidget>,
 
-    show_fan: Option<ButtonWidget>,
+    show_fan: Option<TextWidget>,
     fan_speed: u64,
     fan_speed_controlled: bool,
     scrolling: Scrolling,
 
     show_clocks: Option<TextWidget>,
+
+    show_power_draw: Option<TextWidget>,
+
     maximum_idle: u64,
     maximum_good: u64,
     maximum_info: u64,
@@ -57,115 +59,68 @@ enum NameWidgetMode {
     ShowLabel,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+// TODO add `format` option
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct NvidiaGpuConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "NvidiaGpuConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
 
     /// Label to show instead of the default GPU name from `nvidia-smi`
-    #[serde(default = "NvidiaGpuConfig::default_label")]
     pub label: Option<String>,
 
     /// GPU id in system
-    #[serde(default = "NvidiaGpuConfig::default_gpu_id")]
     pub gpu_id: u64,
 
     /// GPU utilization. In percent.
-    #[serde(default = "NvidiaGpuConfig::default_show_utilization")]
     pub show_utilization: bool,
 
     /// VRAM utilization.
-    #[serde(default = "NvidiaGpuConfig::default_show_memory")]
     pub show_memory: bool,
 
     /// Core GPU temperature. In degrees C.
-    #[serde(default = "NvidiaGpuConfig::default_show_temperature")]
     pub show_temperature: bool,
 
     /// Fan speed. In percents.
-    #[serde(default = "NvidiaGpuConfig::default_show_fan_speed")]
     pub show_fan_speed: bool,
 
     /// GPU clocks. In percents.
-    #[serde(default = "NvidiaGpuConfig::default_show_clocks")]
     pub show_clocks: bool,
 
+    /// Last Measured Power Draw of GPU. In Watts.
+    pub show_power_draw: bool,
+
     /// Maximum temperature, below which state is set to idle
-    #[serde(default = "NvidiaGpuConfig::default_idle")]
     pub idle: u64,
 
     /// Maximum temperature, below which state is set to good
-    #[serde(default = "NvidiaGpuConfig::default_good")]
     pub good: u64,
 
     /// Maximum temperature, below which state is set to info
-    #[serde(default = "NvidiaGpuConfig::default_info")]
     pub info: u64,
 
     /// Maximum temperature, below which state is set to warning
-    #[serde(default = "NvidiaGpuConfig::default_warning")]
     pub warning: u64,
-
-    #[serde(default = "NvidiaGpuConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
 }
 
-impl NvidiaGpuConfig {
-    fn default_interval() -> Duration {
-        Duration::from_secs(3)
-    }
-
-    fn default_label() -> Option<String> {
-        None
-    }
-
-    fn default_gpu_id() -> u64 {
-        0
-    }
-
-    fn default_show_utilization() -> bool {
-        true
-    }
-
-    fn default_show_memory() -> bool {
-        true
-    }
-
-    fn default_show_temperature() -> bool {
-        true
-    }
-
-    fn default_show_fan_speed() -> bool {
-        false
-    }
-
-    fn default_show_clocks() -> bool {
-        false
-    }
-
-    fn default_idle() -> u64 {
-        50
-    }
-
-    fn default_good() -> u64 {
-        70
-    }
-
-    fn default_info() -> u64 {
-        75
-    }
-
-    fn default_warning() -> u64 {
-        80
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for NvidiaGpuConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(3),
+            label: None,
+            gpu_id: 0,
+            show_utilization: true,
+            show_memory: true,
+            show_temperature: true,
+            show_fan_speed: false,
+            show_clocks: false,
+            show_power_draw: false,
+            idle: 50,
+            good: 70,
+            info: 75,
+            warning: 80,
+        }
     }
 }
 
@@ -175,7 +130,7 @@ impl ConfigBlock for NvidiaGpu {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
         let id_memory = pseudo_uuid();
@@ -189,50 +144,58 @@ impl ConfigBlock for NvidiaGpu {
             gpu_enabled: false,
             gpu_id: block_config.gpu_id,
 
-            name_widget: ButtonWidget::new(config.clone(), id)
-                .with_icon("gpu")
+            name_widget: TextWidget::new(id, id, shared_config.clone())
+                .with_icon("gpu")?
                 .with_spacing(Spacing::Inline),
             name_widget_mode: if block_config.label.is_some() {
                 NameWidgetMode::ShowLabel
             } else {
                 NameWidgetMode::ShowDefaultName
             },
-            label: if block_config.label.is_some() {
-                block_config.label.unwrap()
-            } else {
-                "".to_string()
-            },
+            label: block_config.label.unwrap_or_default(),
 
             show_memory: if block_config.show_memory {
-                Some(ButtonWidget::new(config.clone(), id_memory).with_spacing(Spacing::Inline))
+                Some(
+                    TextWidget::new(id, id_memory, shared_config.clone())
+                        .with_spacing(Spacing::Inline),
+                )
             } else {
                 None
             },
             memory_widget_mode: MemoryWidgetMode::ShowUsedMemory,
 
             show_utilization: if block_config.show_utilization {
-                Some(TextWidget::new(config.clone(), id).with_spacing(Spacing::Inline))
+                Some(TextWidget::new(id, id, shared_config.clone()).with_spacing(Spacing::Inline))
             } else {
                 None
             },
 
             show_temperature: if block_config.show_temperature {
-                Some(TextWidget::new(config.clone(), id).with_spacing(Spacing::Inline))
+                Some(TextWidget::new(id, id, shared_config.clone()).with_spacing(Spacing::Inline))
             } else {
                 None
             },
 
             show_fan: if block_config.show_fan_speed {
-                Some(ButtonWidget::new(config.clone(), id_fans).with_spacing(Spacing::Inline))
+                Some(
+                    TextWidget::new(id, id_fans, shared_config.clone())
+                        .with_spacing(Spacing::Inline),
+                )
             } else {
                 None
             },
             fan_speed: 0,
             fan_speed_controlled: false,
-            scrolling: config.scrolling,
+            scrolling: shared_config.scrolling,
 
             show_clocks: if block_config.show_clocks {
-                Some(TextWidget::new(config, id).with_spacing(Spacing::Inline))
+                Some(TextWidget::new(id, id, shared_config.clone()).with_spacing(Spacing::Inline))
+            } else {
+                None
+            },
+
+            show_power_draw: if block_config.show_power_draw {
+                Some(TextWidget::new(id, id, shared_config).with_spacing(Spacing::Inline))
             } else {
                 None
             },
@@ -262,6 +225,9 @@ impl Block for NvidiaGpu {
         }
         if self.show_clocks.is_some() {
             params += "clocks.current.graphics,";
+        }
+        if self.show_power_draw.is_some() {
+            params += "power.draw,";
         }
 
         let handle = Command::new("nvidia-smi")
@@ -351,6 +317,10 @@ impl Block for NvidiaGpu {
             }
             if let Some(ref mut clocks_widget) = self.show_clocks {
                 clocks_widget.set_text(format!("{}MHz", result[count]));
+                count += 1;
+            }
+            if let Some(ref mut power_draw_widget) = self.show_power_draw {
+                power_draw_widget.set_text(format!("{} W", result[count]));
             }
         } else {
             self.name_widget.set_text("DISABLED".to_string());
@@ -379,12 +349,15 @@ impl Block for NvidiaGpu {
             if let Some(ref clocks_widget) = self.show_clocks {
                 widgets.push(clocks_widget);
             }
+            if let Some(ref power_draw_widget) = self.show_power_draw {
+                widgets.push(power_draw_widget);
+            }
         }
         widgets
     }
 
     fn click(&mut self, e: &I3BarEvent) -> Result<()> {
-        if let Some(event_id) = e.id {
+        if let Some(event_id) = e.instance {
             if event_id == self.id {
                 if let MouseButton::Left = e.button {
                     match self.name_widget_mode {

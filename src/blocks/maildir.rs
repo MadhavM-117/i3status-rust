@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
@@ -6,13 +5,12 @@ use maildir::Maildir as ExtMaildir;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
-use crate::input::I3BarEvent;
 use crate::scheduler::Task;
-use crate::widget::{I3BarWidget, State};
 use crate::widgets::text::TextWidget;
+use crate::widgets::{I3BarWidget, State};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,12 +30,6 @@ impl MailType {
     }
 }
 
-impl Default for MailType {
-    fn default() -> MailType {
-        MailType::New
-    }
-}
-
 pub struct Maildir {
     id: usize,
     text: TextWidget,
@@ -48,43 +40,30 @@ pub struct Maildir {
     display_type: MailType,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+//TODO add `format`
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct MaildirConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "MaildirConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
     pub inboxes: Vec<String>,
-    #[serde(default = "MaildirConfig::default_threshold_warning")]
     pub threshold_warning: usize,
-    #[serde(default = "MaildirConfig::default_threshold_critical")]
     pub threshold_critical: usize,
-    #[serde(default)]
     pub display_type: MailType,
-    #[serde(default = "MaildirConfig::default_icon")]
     pub icon: bool,
-    #[serde(default = "MaildirConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
 }
 
-impl MaildirConfig {
-    fn default_interval() -> Duration {
-        Duration::from_secs(5)
-    }
-    fn default_threshold_warning() -> usize {
-        1
-    }
-    fn default_threshold_critical() -> usize {
-        10
-    }
-    fn default_icon() -> bool {
-        true
-    }
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for MaildirConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(5),
+            inboxes: Vec::new(),
+            threshold_warning: 1,
+            threshold_critical: 10,
+            display_type: MailType::New,
+            icon: true,
+        }
     }
 }
 
@@ -94,15 +73,15 @@ impl ConfigBlock for Maildir {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
-        let widget = TextWidget::new(config, id).with_text("");
+        let widget = TextWidget::new(id, 0, shared_config).with_text("");
         Ok(Maildir {
             id,
             update_interval: block_config.interval,
             text: if block_config.icon {
-                widget.with_icon("mail")
+                widget.with_icon("mail")?
             } else {
                 widget
             },
@@ -135,10 +114,6 @@ impl Block for Maildir {
 
     fn view(&self) -> Vec<&dyn I3BarWidget> {
         vec![&self.text]
-    }
-
-    fn click(&mut self, _: &I3BarEvent) -> Result<()> {
-        Ok(())
     }
 
     fn id(&self) -> usize {

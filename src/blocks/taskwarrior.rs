@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::Duration;
 
@@ -6,18 +5,19 @@ use crossbeam_channel::Sender;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
-use crate::input::{I3BarEvent, MouseButton};
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::{I3BarWidget, State};
-use crate::widgets::button::ButtonWidget;
+use crate::widgets::text::TextWidget;
+use crate::widgets::{I3BarWidget, State};
 
 pub struct Taskwarrior {
     id: usize,
-    output: ButtonWidget,
+    output: TextWidget,
     update_interval: Duration,
     warning_threshold: u32,
     critical_threshold: u32,
@@ -26,12 +26,6 @@ pub struct Taskwarrior {
     format: FormatTemplate,
     format_singular: FormatTemplate,
     format_everything_done: FormatTemplate,
-
-    //useful, but optional
-    #[allow(dead_code)]
-    config: Config,
-    #[allow(dead_code)]
-    tx_update_request: Sender<Task>,
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]
@@ -57,80 +51,52 @@ impl Filter {
     }
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct TaskwarriorConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "TaskwarriorConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
 
     /// Threshold from which on the block is marked with a warning indicator
-    #[serde(default = "TaskwarriorConfig::default_threshold_warning")]
     pub warning_threshold: u32,
 
     /// Threshold from which on the block is marked with a critical indicator
-    #[serde(default = "TaskwarriorConfig::default_threshold_critical")]
     pub critical_threshold: u32,
 
     /// A list of tags a task has to have before it's used for counting pending tasks
     /// (DEPRECATED) use filters instead
-    #[serde(default = "TaskwarriorConfig::default_filter_tags")]
     pub filter_tags: Vec<String>,
 
     /// A list of named filter criteria which must be fulfilled to be counted towards
     /// the total, when that filter is active.
-    #[serde(default = "TaskwarriorConfig::default_filters")]
     pub filters: Vec<Filter>,
 
     /// Format override
-    #[serde(default = "TaskwarriorConfig::default_format")]
-    pub format: String,
+    pub format: FormatTemplate,
 
     /// Format override if the count is one
-    #[serde(default = "TaskwarriorConfig::default_format")]
-    pub format_singular: String,
+    pub format_singular: FormatTemplate,
 
     /// Format override if the count is zero
-    #[serde(default = "TaskwarriorConfig::default_format")]
-    pub format_everything_done: String,
-
-    #[serde(default = "TaskwarriorConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
+    pub format_everything_done: FormatTemplate,
 }
 
-impl TaskwarriorConfig {
-    fn default_interval() -> Duration {
-        Duration::from_secs(600)
-    }
-
-    fn default_threshold_warning() -> u32 {
-        10
-    }
-
-    fn default_threshold_critical() -> u32 {
-        20
-    }
-
-    fn default_filter_tags() -> Vec<String> {
-        vec![]
-    }
-
-    fn default_filters() -> Vec<Filter> {
-        vec![Filter::new(
-            "pending".to_string(),
-            "-COMPLETED -DELETED".to_string(),
-        )]
-    }
-
-    fn default_format() -> String {
-        "{count}".to_owned()
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for TaskwarriorConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(600),
+            warning_threshold: 10,
+            critical_threshold: 20,
+            filter_tags: vec![],
+            filters: vec![Filter::new(
+                "pending".to_string(),
+                "-COMPLETED -DELETED".to_string(),
+            )],
+            format: FormatTemplate::default(),
+            format_singular: FormatTemplate::default(),
+            format_everything_done: FormatTemplate::default(),
+        }
     }
 }
 
@@ -140,11 +106,11 @@ impl ConfigBlock for Taskwarrior {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
-        tx_update_request: Sender<Task>,
+        shared_config: SharedConfig,
+        _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
-        let output = ButtonWidget::new(config.clone(), id)
-            .with_icon("tasks")
+        let output = TextWidget::new(id, 0, shared_config)
+            .with_icon("tasks")?
             .with_text("-");
         // If the deprecated `filter_tags` option has been set,
         // convert it to the new `filter` format.
@@ -162,25 +128,12 @@ impl ConfigBlock for Taskwarrior {
             update_interval: block_config.interval,
             warning_threshold: block_config.warning_threshold,
             critical_threshold: block_config.critical_threshold,
-            format: FormatTemplate::from_string(&block_config.format).block_error(
-                "taskwarrior",
-                "Invalid format specified for taskwarrior::format",
-            )?,
-            format_singular: FormatTemplate::from_string(&block_config.format_singular)
-                .block_error(
-                    "taskwarrior",
-                    "Invalid format specified for taskwarrior::format_singular",
-                )?,
-            format_everything_done: FormatTemplate::from_string(
-                &block_config.format_everything_done,
-            )
-            .block_error(
-                "taskwarrior",
-                "Invalid format specified for taskwarrior::format_everything_done",
-            )?,
-            tx_update_request,
+            format: block_config.format.with_default("{count}")?,
+            format_singular: block_config.format_singular.with_default("{count}")?,
+            format_everything_done: block_config
+                .format_everything_done
+                .with_default("{count}")?,
             filter_index: 0,
-            config,
             filters,
             output,
         })
@@ -226,7 +179,7 @@ fn get_number_of_tasks(filter: &str) -> Result<u32> {
 impl Block for Taskwarrior {
     fn update(&mut self) -> Result<Option<Update>> {
         if !has_taskwarrior()? {
-            self.output.set_text("?")
+            self.output.set_text("?".to_string())
         } else {
             let filter = self.filters.get(self.filter_index).block_error(
                 "taskwarrior",
@@ -234,13 +187,13 @@ impl Block for Taskwarrior {
             )?;
             let number_of_tasks = get_number_of_tasks(&filter.filter)?;
             let values = map!(
-                "{count}" => number_of_tasks.to_string(),
-                "{filter_name}" => filter.name.clone()
+                "count" => Value::from_integer(number_of_tasks as i64),
+                "filter_name" => Value::from_string(filter.name.clone()),
             );
-            self.output.set_text(match number_of_tasks {
-                0 => self.format_everything_done.render_static_str(&values)?,
-                1 => self.format_singular.render_static_str(&values)?,
-                _ => self.format.render_static_str(&values)?,
+            self.output.set_texts(match number_of_tasks {
+                0 => self.format_everything_done.render(&values)?,
+                1 => self.format_singular.render(&values)?,
+                _ => self.format.render(&values)?,
             });
             if number_of_tasks >= self.critical_threshold {
                 self.output.set_state(State::Critical);
@@ -260,18 +213,16 @@ impl Block for Taskwarrior {
     }
 
     fn click(&mut self, event: &I3BarEvent) -> Result<()> {
-        if event.matches_id(self.id) {
-            match event.button {
-                MouseButton::Left => {
-                    self.update()?;
-                }
-                MouseButton::Right => {
-                    // Increment the filter_index, rotating at the end
-                    self.filter_index = (self.filter_index + 1) % self.filters.len();
-                    self.update()?;
-                }
-                _ => {}
+        match event.button {
+            MouseButton::Left => {
+                self.update()?;
             }
+            MouseButton::Right => {
+                // Increment the filter_index, rotating at the end
+                self.filter_index = (self.filter_index + 1) % self.filters.len();
+                self.update()?;
+            }
+            _ => {}
         }
 
         Ok(())

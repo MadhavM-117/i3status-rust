@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::process::Command;
 use std::time::Duration;
 
@@ -6,14 +6,15 @@ use crossbeam_channel::Sender;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
-use crate::input::{I3BarEvent, MouseButton};
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::{I3BarWidget, Spacing, State};
-use crate::widgets::button::ButtonWidget;
+use crate::util::has_command;
+use crate::widgets::{text::TextWidget, I3BarWidget, Spacing, State};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -30,8 +31,8 @@ impl Default for TemperatureScale {
 
 pub struct Temperature {
     id: usize,
-    text: ButtonWidget,
-    output: String,
+    text: TextWidget,
+    output: (String, Option<String>),
     collapsed: bool,
     update_interval: Duration,
     scale: TemperatureScale,
@@ -42,20 +43,17 @@ pub struct Temperature {
     format: FormatTemplate,
     chip: Option<String>,
     inputs: Option<Vec<String>>,
+    fallback_required: bool,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct TemperatureConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "TemperatureConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
 
     /// Collapsed by default?
-    #[serde(default = "TemperatureConfig::default_collapsed")]
     pub collapsed: bool,
 
     /// The temperature scale to use for display and thresholds
@@ -79,44 +77,29 @@ pub struct TemperatureConfig {
     pub warning: Option<i64>,
 
     /// Format override
-    #[serde(default = "TemperatureConfig::default_format")]
-    pub format: String,
+    pub format: FormatTemplate,
 
     /// Chip override
-    #[serde(default = "TemperatureConfig::default_chip")]
     pub chip: Option<String>,
 
     /// Inputs whitelist
-    #[serde(default = "TemperatureConfig::default_inputs")]
     pub inputs: Option<Vec<String>>,
-
-    #[serde(default = "TemperatureConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
 }
 
-impl TemperatureConfig {
-    fn default_format() -> String {
-        "{average}° avg, {max}° max".to_owned()
-    }
-
-    fn default_interval() -> Duration {
-        Duration::from_secs(5)
-    }
-
-    fn default_collapsed() -> bool {
-        true
-    }
-
-    fn default_chip() -> Option<String> {
-        None
-    }
-
-    fn default_inputs() -> Option<Vec<String>> {
-        None
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for TemperatureConfig {
+    fn default() -> Self {
+        Self {
+            format: FormatTemplate::default(),
+            interval: Duration::from_secs(5),
+            collapsed: true,
+            scale: TemperatureScale::default(),
+            good: None,
+            idle: None,
+            info: None,
+            warning: None,
+            chip: None,
+            inputs: None,
+        }
     }
 }
 
@@ -126,20 +109,20 @@ impl ConfigBlock for Temperature {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
         Ok(Temperature {
             id,
             update_interval: block_config.interval,
-            text: ButtonWidget::new(config, id)
-                .with_icon("thermometer")
+            text: TextWidget::new(id, 0, shared_config)
+                .with_icon("thermometer")?
                 .with_spacing(if block_config.collapsed {
                     Spacing::Hidden
                 } else {
                     Spacing::Normal
                 }),
-            output: String::new(),
+            output: (String::new(), None),
             collapsed: block_config.collapsed,
             scale: block_config.scale,
             maximum_good: block_config
@@ -166,10 +149,12 @@ impl ConfigBlock for Temperature {
                     TemperatureScale::Celsius => 80,
                     TemperatureScale::Fahrenheit => 176,
                 }),
-            format: FormatTemplate::from_string(&block_config.format)
-                .block_error("temperature", "Invalid format specified for temperature")?,
+            format: block_config
+                .format
+                .with_default("{average} avg, {max} max")?,
             chip: block_config.chip,
             inputs: block_config.inputs,
+            fallback_required: !has_command("temperature", "sensors -j").unwrap_or(false),
         })
     }
 }
@@ -179,7 +164,12 @@ type InputReadings = HashMap<String, f64>;
 
 impl Block for Temperature {
     fn update(&mut self) -> Result<Option<Update>> {
-        let mut args = vec!["-j"];
+        let mut args = if self.fallback_required {
+            vec!["-u"]
+        } else {
+            vec!["-j"]
+        };
+
         if let TemperatureScale::Fahrenheit = self.scale {
             args.push("-f");
         }
@@ -192,33 +182,64 @@ impl Block for Temperature {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
             .unwrap_or_else(|e| e.to_string());
 
-        let parsed: SensorsOutput = serde_json::from_str(&output)
-            .block_error("temperature", "sensors output is invalid")?;
-
         let mut temperatures: Vec<i64> = Vec::new();
-        for (_chip, inputs) in parsed {
-            for (input_name, input_values) in inputs {
-                if let Some(ref whitelist) = self.inputs {
-                    if !whitelist.contains(&input_name) {
-                        continue;
+
+        if self.fallback_required {
+            for line in output.lines() {
+                if let Some(rest) = line.strip_prefix("  temp") {
+                    let rest = rest
+                        .split('_')
+                        .flat_map(|x| x.split(' '))
+                        .flat_map(|x| x.split('.'))
+                        .collect::<Vec<_>>();
+
+                    if rest[1].starts_with("input") {
+                        match rest[2].parse::<i64>() {
+                            Ok(t) if t == 0 => Ok(()),
+                            Ok(t) if t > -101 && t < 151 => {
+                                temperatures.push(t);
+                                Ok(())
+                            }
+                            Ok(t) => {
+                                // This error is recoverable and therefore should not stop the program
+                                eprintln!("Temperature ({}) outside of range ([-100, 150])", t);
+                                Ok(())
+                            }
+                            Err(_) => Err(BlockError(
+                                "temperature".to_owned(),
+                                "failed to parse temperature as an integer".to_owned(),
+                            )),
+                        }?
                     }
                 }
-
-                let values_parsed: InputReadings = match serde_json::from_value(input_values) {
-                    Ok(values) => values,
-                    Err(_) => continue, // probably the "Adapter" key, just ignore.
-                };
-
-                for (value_name, value) in values_parsed {
-                    if !value_name.starts_with("temp") || !value_name.ends_with("input") {
-                        continue;
+            }
+        } else {
+            let parsed: SensorsOutput = serde_json::from_str(&output)
+                .block_error("temperature", "sensors output is invalid")?;
+            for (_chip, inputs) in parsed {
+                for (input_name, input_values) in inputs {
+                    if let Some(ref whitelist) = self.inputs {
+                        if !whitelist.contains(&input_name) {
+                            continue;
+                        }
                     }
 
-                    if value > -101f64 && value < 151f64 {
-                        temperatures.push(value as i64);
-                    } else {
-                        // This error is recoverable and therefore should not stop the program
-                        eprintln!("Temperature ({}) outside of range ([-100, 150])", value);
+                    let values_parsed: InputReadings = match serde_json::from_value(input_values) {
+                        Ok(values) => values,
+                        Err(_) => continue, // probably the "Adapter" key, just ignore.
+                    };
+
+                    for (value_name, value) in values_parsed {
+                        if !value_name.starts_with("temp") || !value_name.ends_with("input") {
+                            continue;
+                        }
+
+                        if value > -101f64 && value < 151f64 {
+                            temperatures.push(value as i64);
+                        } else {
+                            // This error is recoverable and therefore should not stop the program
+                            eprintln!("Temperature ({}) outside of range ([-100, 150])", value);
+                        }
                     }
                 }
             }
@@ -236,13 +257,15 @@ impl Block for Temperature {
             let avg: i64 = (temperatures.iter().sum::<i64>() as f64 / temperatures.len() as f64)
                 .round() as i64;
 
-            let values = map!("{average}" => avg,
-                              "{min}" => min,
-                              "{max}" => max);
+            let values = map!(
+                "average" => Value::from_integer(avg).degrees(),
+                "min" => Value::from_integer(min).degrees(),
+                "max" => Value::from_integer(max).degrees()
+            );
 
-            self.output = self.format.render_static_str(&values)?;
+            self.output = self.format.render(&values)?;
             if !self.collapsed {
-                self.text.set_text(self.output.clone());
+                self.text.set_texts(self.output.clone());
             }
 
             let state = match max {
@@ -264,13 +287,13 @@ impl Block for Temperature {
     }
 
     fn click(&mut self, e: &I3BarEvent) -> Result<()> {
-        if e.matches_id(self.id) && e.button == MouseButton::Left {
+        if e.button == MouseButton::Left {
             self.collapsed = !self.collapsed;
             if self.collapsed {
                 self.text.set_text(String::new());
                 self.text.set_spacing(Spacing::Hidden);
             } else {
-                self.text.set_text(self.output.clone());
+                self.text.set_texts(self.output.clone());
                 self.text.set_spacing(Spacing::Normal);
             }
         }

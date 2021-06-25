@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,13 +16,14 @@ use swayipc::reply::InputChange;
 use swayipc::{Connection, EventType};
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::I3BarWidget;
 use crate::widgets::text::TextWidget;
+use crate::widgets::I3BarWidget;
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -31,12 +32,6 @@ pub enum KeyboardLayoutDriver {
     LocaleBus,
     KbddBus,
     Sway,
-}
-
-impl Default for KeyboardLayoutDriver {
-    fn default() -> Self {
-        KeyboardLayoutDriver::SetXkbMap
-    }
 }
 
 pub trait KeyboardLayoutMonitor {
@@ -120,23 +115,17 @@ impl LocaleBus {
 
 impl KeyboardLayoutMonitor for LocaleBus {
     fn keyboard_layout(&self) -> Result<String> {
-        let layout: String = self
-            .con
+        self.con
             .with_path("org.freedesktop.locale1", "/org/freedesktop/locale1", 1000)
             .get("org.freedesktop.locale1", "X11Layout")
-            .block_error("locale", "Failed to get X11Layout property.")?;
-
-        Ok(layout)
+            .block_error("locale", "Failed to get X11Layout property.")
     }
 
     fn keyboard_variant(&self) -> Result<String> {
-        let layout: String = self
-            .con
+        self.con
             .with_path("org.freedesktop.locale1", "/org/freedesktop/locale1", 1000)
             .get("org.freedesktop.locale1", "X11Variant")
-            .block_error("locale", "Failed to get X11Variant property.")?;
-
-        Ok(layout)
+            .block_error("locale", "Failed to get X11Variant property.")
     }
 
     fn must_poll(&self) -> bool {
@@ -324,14 +313,17 @@ pub struct Sway {
 }
 
 impl Sway {
-    pub fn new(sway_kb_identifier: String) -> Result<Self> {
+    pub fn new(sway_kb_identifier: Option<String>) -> Result<Self> {
         let layout = swayipc::Connection::new()
             .unwrap()
             .get_inputs()
             .unwrap()
             .into_iter()
             .find(|input| {
-                (sway_kb_identifier.is_empty() || input.identifier == sway_kb_identifier)
+                sway_kb_identifier
+                    .as_ref()
+                    .map(|s| s == &input.identifier)
+                    .unwrap_or(true)
                     && input.input_type == "keyboard"
             })
             .and_then(|input| input.xkb_active_layout_name)
@@ -421,36 +413,30 @@ impl KeyboardLayoutMonitor for Sway {
     }
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeyboardLayoutConfig {
-    #[serde(default = "KeyboardLayoutConfig::default_format")]
-    pub format: String,
+    pub format: FormatTemplate,
 
     driver: KeyboardLayoutDriver,
-    #[serde(
-        default = "KeyboardLayoutConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     interval: Duration,
 
-    sway_kb_identifier: String,
+    sway_kb_identifier: Option<String>,
 
-    #[serde(default = "KeyboardLayoutConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
+    // Used to ovrreride long layout names: "German (dead acute)" => "DE"
+    mappings: Option<HashMap<String, String>>,
 }
 
-impl KeyboardLayoutConfig {
-    fn default_format() -> String {
-        "{layout}".to_owned()
-    }
-
-    fn default_interval() -> Duration {
-        Duration::from_secs(60)
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for KeyboardLayoutConfig {
+    fn default() -> Self {
+        Self {
+            format: FormatTemplate::default(),
+            driver: KeyboardLayoutDriver::SetXkbMap,
+            interval: Duration::from_secs(60),
+            sway_kb_identifier: None,
+            mappings: None,
+        }
     }
 }
 
@@ -460,6 +446,7 @@ pub struct KeyboardLayout {
     monitor: Box<dyn KeyboardLayoutMonitor>,
     update_interval: Option<Duration>,
     format: FormatTemplate,
+    mappings: Option<HashMap<String, String>>,
 }
 
 impl ConfigBlock for KeyboardLayout {
@@ -468,7 +455,7 @@ impl ConfigBlock for KeyboardLayout {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         send: Sender<Task>,
     ) -> Result<Self> {
         let monitor: Box<dyn KeyboardLayoutMonitor> = match block_config.driver {
@@ -494,16 +481,14 @@ impl ConfigBlock for KeyboardLayout {
         } else {
             None
         };
-        let output = TextWidget::new(config, id);
+        let output = TextWidget::new(id, 0, shared_config);
         Ok(KeyboardLayout {
             id,
             output,
             monitor,
             update_interval,
-            format: FormatTemplate::from_string(&block_config.format).block_error(
-                "keyboard_layout",
-                "Invalid format specified for keyboard_layout",
-            )?,
+            format: block_config.format.with_default("{layout}")?,
+            mappings: block_config.mappings,
         })
     }
 }
@@ -514,15 +499,19 @@ impl Block for KeyboardLayout {
     }
 
     fn update(&mut self) -> Result<Option<Update>> {
-        let layout = self.monitor.keyboard_layout()?;
+        let mut layout = self.monitor.keyboard_layout()?;
         let variant = self.monitor.keyboard_variant()?;
+        if let Some(ref mappings) = self.mappings {
+            if let Some(mapped) = mappings.get(&format!("{} ({})", layout, variant)) {
+                layout = mapped.to_string();
+            }
+        }
         let values = map!(
-            "{layout}" => layout,
-            "{variant}" => variant
+            "layout" => Value::from_string(layout),
+            "variant" => Value::from_string(variant)
         );
 
-        self.output
-            .set_text(self.format.render_static_str(&values)?);
+        self.output.set_texts(self.format.render(&values)?);
         Ok(self.update_interval.map(|d| d.into()))
     }
 

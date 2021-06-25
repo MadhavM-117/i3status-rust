@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -6,13 +5,13 @@ use crossbeam_channel::Sender;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
 use crate::scheduler::Task;
 use crate::util::read_file;
-use crate::widget::I3BarWidget;
 use crate::widgets::text::TextWidget;
+use crate::widgets::I3BarWidget;
 
 pub struct Uptime {
     id: usize,
@@ -20,25 +19,19 @@ pub struct Uptime {
     update_interval: Duration,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct UptimeConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "UptimeConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
-    #[serde(default = "UptimeConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
 }
 
-impl UptimeConfig {
-    fn default_interval() -> Duration {
-        Duration::from_secs(60)
-    }
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for UptimeConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(60),
+        }
     }
 }
 
@@ -48,15 +41,13 @@ impl ConfigBlock for Uptime {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
-        let text = TextWidget::new(config, id).with_icon("uptime");
-
         Ok(Uptime {
             id,
             update_interval: block_config.interval,
-            text,
+            text: TextWidget::new(id, 0, shared_config).with_icon("uptime")?,
         })
     }
 }

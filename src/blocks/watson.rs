@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -6,15 +5,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::de::deserialize_local_timestamp;
 use crate::errors::*;
-use crate::input::I3BarEvent;
+use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
 use crate::util::xdg_config_home;
-use crate::widget::{I3BarWidget, State};
-use crate::widgets::button::ButtonWidget;
+use crate::widgets::text::TextWidget;
+use crate::widgets::{I3BarWidget, State};
 use chrono::offset::Local;
 use chrono::DateTime;
 use crossbeam_channel::Sender;
@@ -23,47 +22,36 @@ use serde_derive::Deserialize;
 
 pub struct Watson {
     id: usize,
-    text: ButtonWidget,
+    text: TextWidget,
     state_path: PathBuf,
     show_time: bool,
     prev_state: Option<WatsonState>,
     update_interval: Duration,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct WatsonConfig {
     /// Path to state of watson
-    #[serde(default = "WatsonConfig::default_state_path")]
     pub state_path: PathBuf,
-    /// Update interval in seconds
-    #[serde(
-        default = "WatsonConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
-    pub interval: Duration,
-    /// Show time spent
-    #[serde(default = "WatsonConfig::default_show_time")]
-    pub show_time: bool,
 
-    #[serde(default = "WatsonConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
+    /// Update interval in seconds
+    #[serde(deserialize_with = "deserialize_duration")]
+    pub interval: Duration,
+
+    /// Show time spent
+    pub show_time: bool,
 }
 
-impl WatsonConfig {
-    fn default_state_path() -> PathBuf {
+impl Default for WatsonConfig {
+    fn default() -> Self {
         let mut config_dir = xdg_config_home();
         config_dir.push("watson/state");
-        config_dir
-    }
-    fn default_interval() -> Duration {
-        Duration::from_secs(60)
-    }
-    fn default_show_time() -> bool {
-        false
-    }
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+        Self {
+            state_path: config_dir,
+            interval: Duration::from_secs(60),
+            show_time: false,
+        }
     }
 }
 
@@ -73,12 +61,12 @@ impl ConfigBlock for Watson {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         tx_update_request: Sender<Task>,
     ) -> Result<Self> {
         let watson = Watson {
             id,
-            text: ButtonWidget::new(config, id),
+            text: TextWidget::new(id, 0, shared_config),
             state_path: block_config.state_path.clone(),
             show_time: block_config.show_time,
             update_interval: block_config.interval,
@@ -194,11 +182,9 @@ impl Block for Watson {
         }
     }
 
-    fn click(&mut self, e: &I3BarEvent) -> Result<()> {
-        if e.matches_id(self.id) {
-            self.show_time = !self.show_time;
-            self.update()?;
-        }
+    fn click(&mut self, _e: &I3BarEvent) -> Result<()> {
+        self.show_time = !self.show_time;
+        self.update()?;
         Ok(())
     }
 

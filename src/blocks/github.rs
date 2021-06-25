@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
@@ -7,21 +7,21 @@ use regex::Regex;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
 use crate::http;
-use crate::input::I3BarEvent;
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::I3BarWidget;
 use crate::widgets::text::TextWidget;
+use crate::widgets::I3BarWidget;
 
 const GITHUB_TOKEN_ENV: &str = "I3RS_GITHUB_TOKEN";
 
 pub struct Github {
-    text: TextWidget,
     id: usize,
+    text: TextWidget,
     update_interval: Duration,
     api_server: String,
     token: String,
@@ -30,70 +30,54 @@ pub struct Github {
     hide_if_total_is_zero: bool,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct GithubConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "GithubConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
 
-    #[serde(default = "GithubConfig::default_api_server")]
     pub api_server: String,
 
     /// Format override
-    #[serde(default = "GithubConfig::default_format")]
-    pub format: String,
+    pub format: FormatTemplate,
 
-    #[serde(default = "GithubConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
-
-    #[serde(default = "GithubConfig::default_hide_if_total_is_zero")]
     pub hide_if_total_is_zero: bool,
 }
 
-impl GithubConfig {
-    fn default_interval() -> Duration {
-        Duration::from_secs(30)
-    }
-
-    fn default_api_server() -> String {
-        "https://api.github.com".to_owned()
-    }
-
-    fn default_format() -> String {
-        "{total}".to_owned()
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
-    }
-
-    fn default_hide_if_total_is_zero() -> bool {
-        false
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(30),
+            api_server: "https://api.github.com".to_string(),
+            format: FormatTemplate::default(),
+            hide_if_total_is_zero: false,
+        }
     }
 }
 
 impl ConfigBlock for Github {
     type Config = GithubConfig;
 
-    fn new(id: usize, block_config: Self::Config, config: Config, _: Sender<Task>) -> Result<Self> {
+    fn new(
+        id: usize,
+        block_config: Self::Config,
+        shared_config: SharedConfig,
+        _: Sender<Task>,
+    ) -> Result<Self> {
         let token = std::env::var(GITHUB_TOKEN_ENV)
             .block_error("github", "missing I3RS_GITHUB_TOKEN environment variable")?;
 
-        let text = TextWidget::new(config, id)
+        let text = TextWidget::new(id, 0, shared_config)
             .with_text("x")
-            .with_icon("github");
+            .with_icon("github")?;
         Ok(Github {
             id,
             update_interval: block_config.interval,
             text,
             api_server: block_config.api_server,
             token,
-            format: FormatTemplate::from_string(&block_config.format)
-                .block_error("github", "Invalid format specified")?,
+            format: block_config.format.with_default("{total:1}")?,
             total_notifications: 0,
             hide_if_total_is_zero: block_config.hide_if_total_is_zero,
         })
@@ -124,23 +108,23 @@ impl Block for Github {
         let default: u64 = 0;
         self.total_notifications = *aggregations.get("total").unwrap_or(&default);
         let values = map!(
-            "{total}" => format!("{}", self.total_notifications),
+            "total" => Value::from_integer(self.total_notifications as i64),
             // As specified by:
             // https://developer.github.com/v3/activity/notifications/#notification-reasons
-            "{assign}" => format!("{}", aggregations.get("assign").unwrap_or(&default)),
-            "{author}" => format!("{}", aggregations.get("author").unwrap_or(&default)),
-            "{comment}" => format!("{}", aggregations.get("comment").unwrap_or(&default)),
-            "{invitation}" => format!("{}", aggregations.get("invitation").unwrap_or(&default)),
-            "{manual}" => format!("{}", aggregations.get("manual").unwrap_or(&default)),
-            "{mention}" => format!("{}", aggregations.get("mention").unwrap_or(&default)),
-            "{review_requested}" => format!("{}", aggregations.get("review_requested").unwrap_or(&default)),
-            "{security_alert}" => format!("{}", aggregations.get("security_alert").unwrap_or(&default)),
-            "{state_change}" => format!("{}", aggregations.get("state_change").unwrap_or(&default)),
-            "{subscribed}" => format!("{}", aggregations.get("subscribed").unwrap_or(&default)),
-            "{team_mention}" => format!("{}", aggregations.get("team_mention").unwrap_or(&default))
+            "assign" =>           Value::from_integer(*aggregations.get("assign").unwrap_or(&default) as i64),
+            "author" =>           Value::from_integer(*aggregations.get("author").unwrap_or(&default) as i64),
+            "comment" =>          Value::from_integer(*aggregations.get("comment").unwrap_or(&default) as i64),
+            "invitation" =>       Value::from_integer(*aggregations.get("invitation").unwrap_or(&default) as i64),
+            "manual" =>           Value::from_integer(*aggregations.get("manual").unwrap_or(&default) as i64),
+            "mention" =>          Value::from_integer(*aggregations.get("mention").unwrap_or(&default) as i64),
+            "review_requested" => Value::from_integer(*aggregations.get("review_requested").unwrap_or(&default) as i64),
+            "security_alert" =>   Value::from_integer(*aggregations.get("security_alert").unwrap_or(&default) as i64),
+            "state_change" =>     Value::from_integer(*aggregations.get("state_change").unwrap_or(&default) as i64),
+            "subscribed" =>       Value::from_integer(*aggregations.get("subscribed").unwrap_or(&default) as i64),
+            "team_mention" =>     Value::from_integer(*aggregations.get("team_mention").unwrap_or(&default) as i64),
         );
 
-        self.text.set_text(self.format.render_static_str(&values)?);
+        self.text.set_texts(self.format.render(&values)?);
 
         Ok(Some(self.update_interval.into()))
     }
@@ -151,10 +135,6 @@ impl Block for Github {
         } else {
             vec![&self.text]
         }
-    }
-
-    fn click(&mut self, _: &I3BarEvent) -> Result<()> {
-        Ok(())
     }
 
     fn id(&self) -> usize {

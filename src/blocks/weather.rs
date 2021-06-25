@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 
@@ -6,15 +6,15 @@ use crossbeam_channel::Sender;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
 use crate::http;
-use crate::input::{I3BarEvent, MouseButton};
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::{I3BarWidget, State};
-use crate::widgets::button::ButtonWidget;
+use crate::widgets::{text::TextWidget, I3BarWidget, State};
 
 const OPENWEATHERMAP_API_KEY_ENV: &str = "OPENWEATHERMAP_API_KEY";
 const OPENWEATHERMAP_CITY_ID_ENV: &str = "OPENWEATHERMAP_CITY_ID";
@@ -32,6 +32,8 @@ pub enum WeatherService {
         place: Option<String>,
         coordinates: Option<(String, String)>,
         units: OpenWeatherMapUnits,
+        #[serde(default = "WeatherService::default_lang")]
+        lang: Option<String>,
     },
 }
 
@@ -45,6 +47,9 @@ impl WeatherService {
     fn getenv_openweathermap_place() -> Option<String> {
         env::var(OPENWEATHERMAP_PLACE_ENV).ok()
     }
+    fn default_lang() -> Option<String> {
+        Some("en".to_string())
+    }
 }
 
 #[derive(Copy, Clone, Debug, Deserialize, PartialEq)]
@@ -56,9 +61,9 @@ pub enum OpenWeatherMapUnits {
 
 pub struct Weather {
     id: usize,
-    weather: ButtonWidget,
-    format: String,
-    weather_keys: HashMap<String, String>,
+    weather: TextWidget,
+    format: FormatTemplate,
+    weather_keys: HashMap<&'static str, Value>,
     service: WeatherService,
     update_interval: Duration,
     autolocate: bool,
@@ -79,7 +84,9 @@ fn find_ip_location() -> Result<Option<String>> {
     let city = http_call_result
         .content
         .pointer("/city")
-        .map(|v| v.to_string());
+        .map(|v| v.as_str())
+        .flatten()
+        .map(|s| s.to_string());
 
     Ok(city)
 }
@@ -140,10 +147,7 @@ fn convert_wind_direction(direction_opt: Option<f64>) -> String {
 }
 
 fn configuration_error(msg: &str) -> Result<()> {
-    Err(ConfigurationError(
-        "weather".to_owned(),
-        (msg.to_owned(), msg.to_owned()),
-    ))
+    Err(ConfigurationError("weather".to_owned(), msg.to_owned()))
 }
 
 impl Weather {
@@ -155,6 +159,7 @@ impl Weather {
                 place,
                 units,
                 coordinates,
+                lang,
             } => {
                 if api_key_opt.is_none() {
                     return configuration_error(&format!(
@@ -189,14 +194,17 @@ impl Weather {
                         OPENWEATHERMAP_PLACE_ENV.to_string()));
                 };
 
+                // This uses the "Current Weather Data" API endpoint
+                // Refer to https://openweathermap.org/current
                 let openweather_url = &format!(
-                    "https://api.openweathermap.org/data/2.5/weather?{location_query}&appid={api_key}&units={units}",
+                    "https://api.openweathermap.org/data/2.5/weather?{location_query}&appid={api_key}&units={units}&lang={lang}",
                     location_query = location_query,
                     api_key = api_key,
                     units = match *units {
                         OpenWeatherMapUnits::Metric => "metric",
                         OpenWeatherMapUnits::Imperial => "imperial",
                     },
+                    lang = lang.as_ref().unwrap(),
                 );
 
                 let output =
@@ -223,6 +231,13 @@ impl Weather {
 
                 let raw_weather = json
                     .pointer("/weather/0/main")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(malformed_json_error)?
+                    .to_string();
+
+                let raw_weather_verbose = json
+                    .pointer("/weather/0/description")
+                    .and_then(|v| v.as_str())
                     .ok_or_else(malformed_json_error)?
                     .to_string();
 
@@ -259,7 +274,7 @@ impl Weather {
                     "Thunderstorm" => "weather_thunder",
                     "Snow" => "weather_snow",
                     _ => "weather_default",
-                });
+                })?;
 
                 let kmh_wind_speed = if *units == OpenWeatherMapUnits::Metric {
                     raw_wind_speed * 3600.0 / 1000.0
@@ -271,14 +286,17 @@ impl Weather {
                 let apparent_temp =
                     australian_apparent_temp(raw_temp, raw_humidity, raw_wind_speed, *units);
 
-                self.weather_keys = map_to_owned!("{weather}" => raw_weather,
-                                  "{temp}" => format!("{:.0}", raw_temp),
-                                  "{humidity}" => format!("{:.0}", raw_humidity),
-                                  "{apparent}" => format!("{:.0}",apparent_temp),
-                                  "{wind}" => format!("{:.1}", raw_wind_speed),
-                                  "{wind_kmh}" => format!("{:.1}", kmh_wind_speed),
-                                  "{direction}" => convert_wind_direction(raw_wind_direction),
-                                  "{location}" => raw_location);
+                self.weather_keys = map!(
+                    "weather" => Value::from_string(raw_weather),
+                    "weather_verbose" => Value::from_string(raw_weather_verbose),
+                    "temp" => Value::from_integer(raw_temp as i64).degrees(),
+                    "humidity" => Value::from_integer(raw_humidity as i64),
+                    "apparent" => Value::from_integer(apparent_temp as i64).degrees(),
+                    "wind" => Value::from_float(raw_wind_speed),
+                    "wind_kmh" => Value::from_float(kmh_wind_speed),
+                    "direction" => Value::from_string(convert_wind_direction(raw_wind_direction)),
+                    "location" => Value::from_string(raw_location),
+                );
                 Ok(())
             }
         }
@@ -293,30 +311,16 @@ pub struct WeatherConfig {
         deserialize_with = "deserialize_duration"
     )]
     pub interval: Duration,
-    #[serde(default = "WeatherConfig::default_format")]
-    pub format: String,
+    #[serde(default)]
+    pub format: FormatTemplate,
     pub service: WeatherService,
-    #[serde(default = "WeatherConfig::default_autolocate")]
+    #[serde(default)]
     pub autolocate: bool,
-    #[serde(default = "WeatherConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
 }
 
 impl WeatherConfig {
     fn default_interval() -> Duration {
         Duration::from_secs(600)
-    }
-
-    fn default_format() -> String {
-        "{weather} {temp}\u{00b0}".to_string()
-    }
-
-    fn default_autolocate() -> bool {
-        false
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
     }
 }
 
@@ -326,13 +330,15 @@ impl ConfigBlock for Weather {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
         Ok(Weather {
             id,
-            weather: ButtonWidget::new(config, id),
-            format: block_config.format,
+            weather: TextWidget::new(id, 0, shared_config),
+            format: block_config
+                .format
+                .with_default("{weather} {temp}\u{00b0}")?,
             weather_keys: HashMap::new(),
             service: block_config.service,
             update_interval: block_config.interval,
@@ -345,13 +351,13 @@ impl Block for Weather {
     fn update(&mut self) -> Result<Option<Update>> {
         match self.update_weather() {
             Ok(_) => {
-                let fmt = FormatTemplate::from_string(&self.format)?;
-                self.weather.set_text(fmt.render(&self.weather_keys));
+                self.weather
+                    .set_texts(self.format.render(&self.weather_keys)?);
                 self.weather.set_state(State::Idle)
             }
             Err(BlockError(block, _)) | Err(InternalError(block, _, _)) if block == "curl" => {
                 // Ignore curl/api errors
-                self.weather.set_icon("weather_default");
+                self.weather.set_icon("weather_default")?;
                 self.weather.set_text("×".to_string());
                 self.weather.set_state(State::Warning)
             }
@@ -369,10 +375,8 @@ impl Block for Weather {
     }
 
     fn click(&mut self, event: &I3BarEvent) -> Result<()> {
-        if event.matches_id(self.id()) {
-            if let MouseButton::Left = event.button {
-                self.update()?;
-            }
+        if let MouseButton::Left = event.button {
+            self.update()?;
         }
         Ok(())
     }

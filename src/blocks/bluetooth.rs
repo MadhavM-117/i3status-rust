@@ -1,5 +1,5 @@
 use serde_derive::Deserialize;
-use std::collections::BTreeMap;
+
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,13 +12,14 @@ use dbus::{
 };
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::errors::*;
-use crate::input::{I3BarEvent, MouseButton};
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::{I3BarWidget, State};
-use crate::widgets::button::ButtonWidget;
+use crate::widgets::text::TextWidget;
+use crate::widgets::{I3BarWidget, State};
 
 pub struct BluetoothDevice {
     pub path: String,
@@ -113,11 +114,10 @@ impl BluetoothDevice {
     }
 
     pub fn available(&self) -> Result<bool> {
-        let available = *self
+        Ok(*self
             .available
             .lock()
-            .block_error("bluetooth", "failed to acquire lock for `available`")?;
-        Ok(available)
+            .block_error("bluetooth", "failed to acquire lock for `available`")?)
     }
 
     pub fn connected(&self) -> bool {
@@ -217,9 +217,10 @@ impl BluetoothDevice {
 
 pub struct Bluetooth {
     id: usize,
-    output: ButtonWidget,
+    output: TextWidget,
     device: BluetoothDevice,
     hide_disconnected: bool,
+    format: FormatTemplate,
     format_unavailable: FormatTemplate,
 }
 
@@ -227,27 +228,15 @@ pub struct Bluetooth {
 #[serde(deny_unknown_fields)]
 pub struct BluetoothConfig {
     pub mac: String,
+    //DEPRECATED
+    //TODO remove
     pub label: Option<String>,
-    #[serde(default = "BluetoothConfig::default_hide_disconnected")]
+    #[serde(default)]
     pub hide_disconnected: bool,
-    #[serde(default = "BluetoothConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
-    #[serde(default = "BluetoothConfig::default_format_unavailable")]
-    pub format_unavailable: String,
-}
-
-impl BluetoothConfig {
-    fn default_hide_disconnected() -> bool {
-        false
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
-    }
-
-    fn default_format_unavailable() -> String {
-        "{label} x".into()
-    }
+    #[serde(default)]
+    pub format: FormatTemplate,
+    #[serde(default)]
+    pub format_unavailable: FormatTemplate,
 }
 
 impl ConfigBlock for Bluetooth {
@@ -256,7 +245,7 @@ impl ConfigBlock for Bluetooth {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         send: Sender<Task>,
     ) -> Result<Self> {
         let device = BluetoothDevice::new(block_config.mac, block_config.label)?;
@@ -264,16 +253,17 @@ impl ConfigBlock for Bluetooth {
 
         Ok(Bluetooth {
             id,
-            output: ButtonWidget::new(config, id).with_icon(match device.icon {
+            output: TextWidget::new(id, 0, shared_config).with_icon(match device.icon {
                 Some(ref icon) if icon == "audio-card" => "headphones",
                 Some(ref icon) if icon == "input-gaming" => "joystick",
                 Some(ref icon) if icon == "input-keyboard" => "keyboard",
                 Some(ref icon) if icon == "input-mouse" => "mouse",
                 _ => "bluetooth",
-            }),
+            })?,
             device,
             hide_disconnected: block_config.hide_disconnected,
-            format_unavailable: FormatTemplate::from_string(&block_config.format_unavailable)?,
+            format: block_config.format.with_default("{label} {percentage}")?,
+            format_unavailable: block_config.format_unavailable.with_default("{label} x")?,
         })
     }
 }
@@ -284,11 +274,11 @@ impl Block for Bluetooth {
     }
 
     fn update(&mut self) -> Result<Option<Update>> {
-        let values = map!(
-            "{label}" => self.device.label.clone()
-        );
-
-        if self.device.available().unwrap() {
+        if self.device.available()? {
+            let values = map!(
+                "label" => Value::from_string(self.device.label.clone()),
+                "percentage" => Value::from_integer(self.device.battery().unwrap_or(0) as i64).percents(),
+            );
             let connected = self.device.connected();
             self.output.set_text(self.device.label.to_string());
             self.output
@@ -300,7 +290,7 @@ impl Block for Bluetooth {
                 Some(ref icon) if icon == "input-keyboard" => "keyboard",
                 Some(ref icon) if icon == "input-mouse" => "mouse",
                 _ => "bluetooth",
-            });
+            })?;
 
             // Use battery info, when available.
             if let Some(value) = self.device.battery() {
@@ -311,23 +301,24 @@ impl Block for Bluetooth {
                     61..=100 => State::Good,
                     _ => State::Warning,
                 });
-                self.output
-                    .set_text(format!("{} {}%", self.device.label, value));
             }
+            self.output.set_texts(self.format.render(&values)?);
         } else {
+            let values = map!(
+                "label" => Value::from_string(self.device.label.clone()),
+                "percentage" => Value::from_string("".into()),
+            );
             self.output.set_state(State::Idle);
             self.output
-                .set_text(self.format_unavailable.render_static_str(&values)?);
+                .set_texts(self.format_unavailable.render(&values)?);
         }
 
         Ok(None)
     }
 
     fn click(&mut self, event: &I3BarEvent) -> Result<()> {
-        if event.matches_id(self.id) {
-            if let MouseButton::Right = event.button {
-                self.device.toggle()?;
-            }
+        if let MouseButton::Right = event.button {
+            self.device.toggle()?;
         }
         Ok(())
     }

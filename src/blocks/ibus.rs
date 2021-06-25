@@ -19,13 +19,15 @@ use regex::Regex;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::errors::*;
-use crate::input::I3BarEvent;
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
+use crate::protocol::i3bar_event::I3BarEvent;
 use crate::scheduler::Task;
-use crate::util::{xdg_config_home, FormatTemplate};
-use crate::widget::I3BarWidget;
+use crate::util::xdg_config_home;
 use crate::widgets::text::TextWidget;
+use crate::widgets::I3BarWidget;
 
 pub struct IBus {
     id: usize,
@@ -35,30 +37,19 @@ pub struct IBus {
     format: FormatTemplate,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct IBusConfig {
-    #[serde(default = "IBusConfig::default_mappings")]
     pub mappings: Option<BTreeMap<String, String>>,
-
-    #[serde(default = "IBusConfig::default_format")]
-    pub format: String,
-
-    #[serde(default = "IBusConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
+    pub format: FormatTemplate,
 }
 
-impl IBusConfig {
-    fn default_mappings() -> Option<BTreeMap<String, String>> {
-        None
-    }
-
-    fn default_format() -> String {
-        "{engine}".into()
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for IBusConfig {
+    fn default() -> Self {
+        Self {
+            mappings: None,
+            format: FormatTemplate::default(),
+        }
     }
 }
 
@@ -69,7 +60,7 @@ impl ConfigBlock for IBus {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         send: Sender<Task>,
     ) -> Result<Self> {
         let send2 = send.clone();
@@ -216,13 +207,13 @@ impl ConfigBlock for IBus {
             })
             .unwrap();
 
-        let text = TextWidget::new(config, id).with_text("IBus");
+        let text = TextWidget::new(id, 0, shared_config).with_text("IBus");
         Ok(IBus {
             id,
             text,
             engine: engine_original,
             mappings: block_config.mappings,
-            format: FormatTemplate::from_string(&block_config.format)?,
+            format: block_config.format.with_default("{engine}")?,
         })
     }
 }
@@ -249,10 +240,10 @@ impl Block for IBus {
         };
 
         let values = map!(
-            "{engine}" => display_engine
+            "engine" => Value::from_string(display_engine)
         );
 
-        self.text.set_text(self.format.render_static_str(&values)?);
+        self.text.set_texts(self.format.render(&values)?);
         Ok(None)
     }
 
@@ -261,9 +252,8 @@ impl Block for IBus {
         vec![&self.text]
     }
 
-    // This function is called on every block for every click.
-    // TODO: Filter events by using the event.name property,
-    // and use to switch between input engines?
+    // TODO:
+    // switch between input engines?
     fn click(&mut self, _: &I3BarEvent) -> Result<()> {
         Ok(())
     }

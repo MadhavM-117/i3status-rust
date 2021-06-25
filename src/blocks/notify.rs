@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -10,44 +9,38 @@ use dbus::message::SignalArgs;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::errors::*;
-use crate::input::{I3BarEvent, MouseButton};
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
+use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
-use crate::util::{pseudo_uuid, FormatTemplate};
-use crate::widget::I3BarWidget;
-use crate::widgets::button::ButtonWidget;
+use crate::widgets::text::TextWidget;
+use crate::widgets::I3BarWidget;
 
 // TODO
 // Add driver option so can choose between dunst, mako, etc.
 
 pub struct Notify {
     id: usize,
-    notify_id: usize,
     paused: Arc<Mutex<i64>>,
     format: FormatTemplate,
-    output: ButtonWidget,
+    output: TextWidget,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct NotifyConfig {
-    /// Format string for displaying phone information.
-    #[serde(default = "NotifyConfig::default_format")]
-    pub format: String,
-
-    #[serde(default = "NotifyConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
+    /// Format string which describes the output of this block.
+    pub format: FormatTemplate,
 }
 
-impl NotifyConfig {
-    fn default_format() -> String {
-        // display just the bell icon
-        "".into()
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            // display just the bell icon
+            format: FormatTemplate::default(),
+        }
     }
 }
 
@@ -57,11 +50,9 @@ impl ConfigBlock for Notify {
     fn new(
         id: usize,
         block_config: Self::Config,
-        config: Config,
+        shared_config: SharedConfig,
         send: Sender<Task>,
     ) -> Result<Self> {
-        let notify_id = pseudo_uuid();
-
         let c = Connection::get_private(BusType::Session).block_error(
             "notify",
             &"Failed to establish D-Bus connection".to_string(),
@@ -117,10 +108,9 @@ impl ConfigBlock for Notify {
 
         Ok(Notify {
             id,
-            notify_id,
             paused: state,
-            format: FormatTemplate::from_string(&block_config.format)?,
-            output: ButtonWidget::new(config, notify_id).with_icon(icon),
+            format: block_config.format.with_default("")?,
+            output: TextWidget::new(id, 0, shared_config).with_icon(icon)?,
         })
     }
 }
@@ -137,14 +127,13 @@ impl Block for Notify {
             .block_error("notify", "failed to acquire lock for `state`")?;
 
         let values = map!(
-            "{state}" => paused.to_string()
+            "state" => Value::from_string(paused.to_string())
         );
 
-        self.output
-            .set_text(self.format.render_static_str(&values)?);
+        self.output.set_texts(self.format.render(&values)?);
 
         let icon = if paused == 1 { "bell-slash" } else { "bell" };
-        self.output.set_icon(icon);
+        self.output.set_icon(icon)?;
 
         Ok(None)
     }
@@ -155,34 +144,32 @@ impl Block for Notify {
     }
 
     fn click(&mut self, e: &I3BarEvent) -> Result<()> {
-        if e.matches_id(self.notify_id) {
-            if let MouseButton::Left = e.button {
-                let c = Connection::get_private(BusType::Session).block_error(
-                    "notify",
-                    &"Failed to establish D-Bus connection".to_string(),
-                )?;
+        if let MouseButton::Left = e.button {
+            let c = Connection::get_private(BusType::Session).block_error(
+                "notify",
+                &"Failed to establish D-Bus connection".to_string(),
+            )?;
 
-                let p = c.with_path(
-                    "org.freedesktop.Notifications",
-                    "/org/freedesktop/Notifications",
-                    5000,
-                );
+            let p = c.with_path(
+                "org.freedesktop.Notifications",
+                "/org/freedesktop/Notifications",
+                5000,
+            );
 
-                let paused = *self
-                    .paused
-                    .lock()
-                    .block_error("notify", "failed to acquire lock")?;
+            let paused = *self
+                .paused
+                .lock()
+                .block_error("notify", "failed to acquire lock")?;
 
-                if paused == 1 {
-                    p.set("org.dunstproject.cmd0", "paused", false)
-                        .block_error("notify", &"Failed to query D-Bus".to_string())?;
-                } else {
-                    p.set("org.dunstproject.cmd0", "paused", true)
-                        .block_error("notify", &"Failed to query D-Bus".to_string())?;
-                }
-
-                // block will auto-update due to monitoring the bus
+            if paused == 1 {
+                p.set("org.dunstproject.cmd0", "paused", false)
+                    .block_error("notify", &"Failed to query D-Bus".to_string())?;
+            } else {
+                p.set("org.dunstproject.cmd0", "paused", true)
+                    .block_error("notify", &"Failed to query D-Bus".to_string())?;
             }
+
+            // block will auto-update due to monitoring the bus
         }
         Ok(())
     }

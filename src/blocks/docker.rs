@@ -1,19 +1,18 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use serde_derive::Deserialize;
 
 use crate::blocks::{Block, ConfigBlock, Update};
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::de::deserialize_duration;
 use crate::errors::*;
+use crate::formatting::value::Value;
+use crate::formatting::FormatTemplate;
 use crate::http;
-use crate::input::I3BarEvent;
 use crate::scheduler::Task;
-use crate::util::FormatTemplate;
-use crate::widget::I3BarWidget;
 use crate::widgets::text::TextWidget;
+use crate::widgets::I3BarWidget;
 
 pub struct Docker {
     id: usize,
@@ -40,50 +39,42 @@ struct Status {
     images: i64,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
 pub struct DockerConfig {
     /// Update interval in seconds
-    #[serde(
-        default = "DockerConfig::default_interval",
-        deserialize_with = "deserialize_duration"
-    )]
+    #[serde(deserialize_with = "deserialize_duration")]
     pub interval: Duration,
 
     /// Format override
-    #[serde(default = "DockerConfig::default_format")]
-    pub format: String,
-
-    #[serde(default = "DockerConfig::default_color_overrides")]
-    pub color_overrides: Option<BTreeMap<String, String>>,
+    pub format: FormatTemplate,
 }
 
-impl DockerConfig {
-    fn default_interval() -> Duration {
-        Duration::from_secs(5)
-    }
-
-    fn default_format() -> String {
-        "{running}%".to_owned()
-    }
-
-    fn default_color_overrides() -> Option<BTreeMap<String, String>> {
-        None
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(5),
+            format: FormatTemplate::default(),
+        }
     }
 }
 
 impl ConfigBlock for Docker {
     type Config = DockerConfig;
 
-    fn new(id: usize, block_config: Self::Config, config: Config, _: Sender<Task>) -> Result<Self> {
-        let text = TextWidget::new(config, id)
+    fn new(
+        id: usize,
+        block_config: Self::Config,
+        shared_config: SharedConfig,
+        _: Sender<Task>,
+    ) -> Result<Self> {
+        let text = TextWidget::new(id, 0, shared_config)
             .with_text("N/A")
-            .with_icon("docker");
+            .with_icon("docker")?;
         Ok(Docker {
             id,
             text,
-            format: FormatTemplate::from_string(&block_config.format)
-                .block_error("docker", "Invalid format specified")?,
+            format: block_config.format.with_default("{running}")?,
             update_interval: block_config.interval,
         })
     }
@@ -103,24 +94,20 @@ impl Block for Docker {
             .block_error("docker", "Failed to parse JSON response.")?;
 
         let values = map!(
-            "{total}" => format!("{}", status.total),
-            "{running}" => format!("{}", status.running),
-            "{paused}" => format!("{}", status.paused),
-            "{stopped}" => format!("{}", status.stopped),
-            "{images}" => format!("{}", status.images)
+            "total" =>   Value::from_integer(status.total),
+            "running" => Value::from_integer(status.running),
+            "paused" =>  Value::from_integer(status.paused),
+            "stopped" => Value::from_integer(status.stopped),
+            "images" =>  Value::from_integer(status.images),
         );
 
-        self.text.set_text(self.format.render_static_str(&values)?);
+        self.text.set_texts(self.format.render(&values)?);
 
         Ok(Some(self.update_interval.into()))
     }
 
     fn view(&self) -> Vec<&dyn I3BarWidget> {
         vec![&self.text]
-    }
-
-    fn click(&mut self, _: &I3BarEvent) -> Result<()> {
-        Ok(())
     }
 
     fn id(&self) -> usize {
